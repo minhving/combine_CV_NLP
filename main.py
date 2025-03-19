@@ -1,123 +1,114 @@
 import cv2
 import mediapipe as mp
+import math
+import numpy as np
+import pytesseract
 
-# Initialize MediaPipe
-mp_drawing = mp.solutions.drawing_utils
-mp_drawing_styles = mp.solutions.drawing_styles
+# Initialize MediaPipe Hands solution and drawing utility
 mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(max_num_hands=1,
+                       min_detection_confidence=0.7,
+                       min_tracking_confidence=0.7)
+mp_draw = mp.solutions.drawing_utils
 
-# Store circle positions
-circle_points = []
-
-
-# Function to check if the index finger is pointing up
-def is_pointing_up(landmarks):
-    """Checks if the index finger is pointing up."""
-    index_tip = landmarks[8]  # Index finger tip
-    index_mcp = landmarks[5]  # Base of index finger
-    wrist = landmarks[0]  # Wrist
-
-    # Condition 1: Index tip must be higher than its base
-    tip_above_base = index_tip.y < index_mcp.y
-    check1 = landmarks[7].y > index_tip.y
-    # Condition 2: Index tip should also be higher than the wrist
-    #tip_above_wrist = index_tip.y < wrist.y
-
-    #Condition 3 (Optional): The slope between tip and base should be steep
-    slope = abs(index_tip.y - index_mcp.y) / abs(index_tip.x - index_mcp.x + 1e-6)  # Avoid division by zero
-    steep_angle = slope > 1.5  # Adjust this threshold as needed
-
-    return tip_above_base and check1 and steep_angle
-    #return tip_above_base and tip_above_wrist and steep_angle
-
-
-# Function to detect if only the index finger is pointing up
-def is_pointing_up_gesture(landmarks):
-    """Checks if the user is making a 'pointing up' gesture"""
-
-    if not is_pointing_up(landmarks):  # Ensure index is pointing up
-        return False
-
-        # Other fingers
-    middle_tip, middle_mcp = landmarks[12], landmarks[9]
-    ring_tip, ring_mcp = landmarks[16], landmarks[13]
-    pinky_tip, pinky_mcp = landmarks[20], landmarks[17]
-
-    # Ensure other fingers are folded (tip below base)
-    fingers_folded = (
-            middle_tip.y > middle_mcp.y and
-            ring_tip.y > ring_mcp.y and
-            pinky_tip.y > pinky_mcp.y
-    )
-
-    return fingers_folded  # True if pointing up with only the index finger
-
-
-# Open webcam
+# Open the webcam
 cap = cv2.VideoCapture(0)
+draw_points = []
+# Threshold for maximum allowed distance between consecutive points (in pixels)
+THRESHOLD = 50
 
-# Initialize MediaPipe Hands
-with mp_hands.Hands(
-        model_complexity=0,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5
-) as hands:
-    while cap.isOpened():
-        success, image = cap.read()
-        if not success:
-            print("Ignoring empty camera frame.")
-            continue
+# Flag to prevent multiple recognitions per drawing session
+recognition_done = False
+recognized_text = ""
 
-        # Convert image to RGB (MediaPipe requirement)
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        image.flags.writeable = False  # Improve performance
-        results = hands.process(image)  # Detect hands
+def fingers_folded(hand_landmarks):
+    """
+    Checks if the index, middle, ring, and pinky fingers are folded.
+    For each finger, the tip should be below its PIP joint.
+    """
+    lm = hand_landmarks.landmark
+    folded = True
+    # Index: tip (8) vs. pip (6)
+    if lm[8].y < lm[6].y:
+        folded = False
+    # Middle: tip (12) vs. pip (10)
+    if lm[12].y < lm[10].y:
+        folded = False
+    # Ring: tip (16) vs. pip (14)
+    if lm[16].y < lm[14].y:
+        folded = False
+    # Pinky: tip (20) vs. pip (18)
+    if lm[20].y < lm[18].y:
+        folded = False
+    return folded
 
-        # Convert image back to BGR for OpenCV
-        image.flags.writeable = True
-        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
 
-        # Get image size
-        h, w, _ = image.shape
+    frame = cv2.flip(frame, 1)  # Mirror effect
+    h, w, _ = frame.shape
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = hands.process(rgb_frame)
 
-        gesture_text = ""  # Initialize text
+    # If a hand is detected, process landmarks
+    if results.multi_hand_landmarks:
+        hand_landmarks = results.multi_hand_landmarks[0]
+        # Draw hand landmarks on frame (optional)
+        mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
 
-        # Draw detected hands and process landmarks
-        if results.multi_hand_landmarks:
-            for hand_landmarks in results.multi_hand_landmarks:
-                mp_drawing.draw_landmarks(
-                    image,
-                    hand_landmarks,
-                    mp_hands.HAND_CONNECTIONS,
-                    mp_drawing_styles.get_default_hand_landmarks_style(),
-                    mp_drawing_styles.get_default_hand_connections_style()
-                )
+        # Get index finger tip and its PIP joint landmarks
+        index_tip = hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP]
+        index_pip = hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_PIP]
+        x, y = int(index_tip.x * w), int(index_tip.y * h)
 
-                landmarks = hand_landmarks.landmark  # Get landmarks
+        # Only record point if the index finger is raised (tip above PIP)
+        if index_tip.y < index_pip.y:
+            draw_points.append((x, y))
+            # Mark the current point (optional)
+            cv2.circle(frame, (x, y), 5, (0, 0, 255), cv2.FILLED)
+            recognition_done = False  # Reset recognition if drawing resumes
 
-                # Check if the user is "pointing up"
-                if is_pointing_up_gesture(landmarks):
-                    gesture_text = "☝️ Pointing Up!"
-                    x, y = landmarks[8].x, landmarks[8].y  # Get index finger tip position
-                    x, y = int(x * w), int(y * h)  # Convert to pixel coordinates
-                    circle_points.append((x, y))  # Store points for drawing circles
+        # If all fingers are folded and we've collected enough points, trigger OCR once
+        if fingers_folded(hand_landmarks) and not recognition_done and len(draw_points) > 10:
+            # Create a blank canvas (black background)
+            canvas = np.zeros((h, w), dtype=np.uint8)
+            # Draw the trail on the canvas: white lines (value 255)
+            for i in range(1, len(draw_points)):
+                pt1 = draw_points[i - 1]
+                pt2 = draw_points[i]
+                if math.hypot(pt2[0] - pt1[0], pt2[1] - pt1[1]) < THRESHOLD:
+                    cv2.line(canvas, pt1, pt2, 255, 3)
+            # Optionally, dilate to thicken the stroke for better OCR
+            kernel = np.ones((3, 3), np.uint8)
+            canvas = cv2.dilate(canvas, kernel, iterations=1)
+            # Invert the canvas so that text appears dark on a light background
+            canvas_inv = cv2.bitwise_not(canvas)
+            # Use pytesseract to extract the text
+            recognized_text = pytesseract.image_to_string(canvas_inv, config='--psm 7').strip()
+            print("Recognized:", recognized_text)
+            recognition_done = True
 
+    # Draw the trail by connecting consecutive points if they are close enough
+    for i in range(1, len(draw_points)):
+        pt1 = draw_points[i - 1]
+        pt2 = draw_points[i]
+        if math.hypot(pt2[0] - pt1[0], pt2[1] - pt1[1]) < THRESHOLD:
+            cv2.line(frame, pt1, pt2, (255, 0, 0), 3)
 
-        # Draw circles at stored points
-        for point in circle_points:
-            cv2.circle(image, point, 10, (255, 0, 255), -1)  # Draw filled circle
+    # Display recognized text on the frame
+    cv2.putText(frame, recognized_text, (10, 100), cv2.FONT_HERSHEY_SIMPLEX,
+                2, (0, 255, 0), 3, cv2.LINE_AA)
 
-        # Display gesture text on screen
-        if gesture_text:
-            cv2.putText(image, gesture_text, (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    cv2.imshow("Hand Drawing Recognition", frame)
+    key = cv2.waitKey(1) & 0xFF
+    if key == ord('c'):  # Clear drawing and recognized text
+        draw_points = []
+        recognized_text = ""
+        recognition_done = False
+    elif key == ord('q'):  # Quit the application
+        break
 
-        # Display the image with hand tracking and drawing
-        cv2.imshow('Pointing Up Drawing', cv2.flip(image, 1))  # Flip for mirror effect
-
-        # Exit when 'q' is pressed
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
-# Release resources
 cap.release()
 cv2.destroyAllWindows()
