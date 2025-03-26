@@ -2,14 +2,14 @@ from imports import *
 
 class RagOpenAI:
     def __init__(self):
-        self.model = 'gpt-4o-mini'
+        self.model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
         self.data = None
         self.openai_token = None
         self.client = None
         self.collection = None
 
     def load_from_json(self):
-        with open("output.json", "r") as f:
+        with open("clean_output.json", "r") as f:
             self.data = json.load(f)
         ids = self.data.get('ids')
         documents = self.data.get('documents')
@@ -26,86 +26,81 @@ class RagOpenAI:
             api_key=openai_token,
             model_name="text-embedding-3-large"  # Choose your embedding model
         )
+        client = chromadb.PersistentClient(path="products_vectorstore")
+        self.collection = client.get_or_create_collection('products')
 
 
-        self.data = pd.read_csv("youtube_titles.csv")
+    def description(self,item):
+        text = item.prompt.replace("How much does this cost to the nearest dollar?\n\n", "")
+        return text.split("\n\nPrice is $")[0]
+    def create_element(self):
+        with open("train.pkl", "rb") as f:
+            train = pickle.load(f)
 
-        chroma_client = chromadb.PersistentClient(path="./chroma_db")  # Use an in-memory or persistent database
-        # self.collection = chroma_client.get_or_create_collection(name="openai_embeddings", embedding_function=openai_ef)
-        chroma_client.delete_collection(name="openai_embeddings")
-        self.collection = chroma_client.create_collection(name="openai_embeddings", embedding_function=openai_ef)
-        ids, documents, metadata, vectors = self.load_from_json()
+
+
+        with open("output.json", "r") as f:
+            vectors = json.load(f)
+
+
+        client = chromadb.PersistentClient(path="products_vectorstore")
+        collection_name = "products"
+        existing_collection_names = [collection.name for collection in client.list_collections()]
+        if collection_name in existing_collection_names:
+            client.delete_collection(collection_name)
+            print(f"Deleted existing collection: {collection_name}")
+            self.collection = client.create_collection(collection_name)
+
+
+        for i in tqdm(range(0, len(train), 1000)):
+            documents = [self.description(item) for item in train[i: i + 1000]]
+            #vectors = model.encode(documents).astype(float).tolist()
+            metadatas = [{"category": item.category, "price": item.price} for item in train[i: i + 1000]]
+            ids = [f"doc_{j}" for j in range(i, i + 1000)]
+
         self.collection.add(
             ids=ids,
             documents=documents,
-            metadatas=metadata,
-            embeddings=vectors
+            embeddings=vectors,
+            metadatas=metadatas
         )
-    def train_test_items_split(self):
-        train, test = train_test_split(self.data, test_size=0.2, random_state=42)
-        return train,test
 
-    def create_element(self):
-        train,test = self.train_test_items_split()
-        ids = [f"doc_{i}" for i in range(len(train))]
-        documents = [train['title'].iloc[i] for i in range(len(train))]
-        metadatas = [{"category": train['category_1'].iloc[i], "Vid_id": train['vid_id'].iloc[i]} for i in
-                     range(len(train))]
-        vectors = [
-            self.client.embeddings.create(
-                input=train['title'].iloc[i],
-                model="text-embedding-3-large",
-            ) for i in range(len(train))
-        ]
-        vector_values = [vector.data[0].embedding for vector in vectors]
-        return ids, documents, metadatas, vector_values
-    def write_to_json(self):
-        # Extract embeddings from CreateEmbeddingResponse objects
-        ids, documents, metadatas, vector_values = self.create_element()
+    def find_similars(self,item):
+        results = self.collection.query(query_embeddings=self.model.encode(item).astype(float).tolist(), n_results=5)
+        documents = results['documents'][0][:]
+        prices = [m['price'] for m in results['metadatas'][0][:]]
+        return documents, prices
 
-        data = {
-            "ids": ids,
-            "documents": documents,
-            "metadata": metadatas,
-            "vectors": vector_values  # Use the extracted embeddings
-        }
+    def get_price(self,s):
+        s = s.replace('$', '').replace(',', '')
+        match = re.search(r"[-+]?\d*\.\d+|\d+", s)
+        return float(match.group()) if match else 0
 
-        # Save to a JSON file
-        with open("output.json", "w") as f:
-            json.dump(data, f, indent=4)
-
-
-
-    def find_similars(self,product):
-        vector_item = self.client.embeddings.create(input=product, model='text-embedding-3-large')
-        results = self.collection.query(query_embeddings=vector_item.data[0].embedding, n_results=5)
-        title = []
-        vid_id = []
-        for i in range(len(results['documents'][0])):
-            title.append(results['documents'][0][i])
-            vid_id.append(results['metadatas'][0][i]['Vid_id'])
-        return title, vid_id
-
-    def messages_for(self,item):
-        system_message = "You estimate which video below is suitable for the keyword that user want.Only return video title and Video ID"
-        title, vid_id = self.find_similars(item)
-        user_prompt = "Here is 5 choices that you can choose from:\n"
-        for i in range(len(title)):
-            user_prompt += f"1. Title: {title[i]}\n Video ID: {vid_id[i]}\n"
+    def make_context(self,similars, prices):
+        message = "To provide some context, here are some other items that might be similar to the item you need to estimate.\n\n"
+        for similar, price in zip(similars, prices):
+            message += f"Potentially related product:\n{similar}\nPrice is ${price:.2f}\n\n"
+        return message
+    def messages_for(self,description, similars, prices):
+        system_message = "You estimate prices of items. Reply only with the price, no explanation"
+        user_prompt = self.make_context(similars, prices)
         user_prompt += "And now the question for you:\n\n"
-        user_prompt += f"Analyze and determine three titles suitable for the keyword from 5 options above: {item}\n"
+        user_prompt += "How much does this cost?\n\n" + description
         return [
             {"role": "system", "content": system_message},
             {"role": "user", "content": user_prompt},
-            {"role": "assistant", "content": "Title is , video id is"}
+            {"role": "assistant", "content": "Price is $"}
         ]
 
-    def reply_from_chat_bot(self,item):
+    def predict(self,description):
+        documents, prices = self.find_similars(description)
         response = self.client.chat.completions.create(
-            model="gpt-4o",
-            messages=self.messages_for(item)
+            model="gpt-4o-mini",
+            messages=self.messages_for(description, documents, prices),
+            seed=42,
+            max_tokens=5
         )
-        result_from_ai = response.choices[0].message.content
-        return result_from_ai
+        reply = response.choices[0].message.content
+        return self.get_price(reply)
 
 

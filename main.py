@@ -6,9 +6,16 @@ import numpy as np
 import pytesseract
 import time
 import threading
+from ultralytics import YOLO
 
-model = RagOpenAI()
-model.initialize_openai()
+# Load the YOLO11 model
+model = YOLO("yolo11n.pt")
+
+# #load predict price
+model_predict = EnsembleAgent()
+model_predict.initialize()
+detected_object = None
+
 
 # Initialize MediaPipe Hands solution and drawing utility
 mp_hands = mp.solutions.hands
@@ -17,23 +24,39 @@ hands = mp_hands.Hands(max_num_hands=1,
                        min_tracking_confidence=0.7)
 mp_draw = mp.solutions.drawing_utils
 
-# Open the webcam
 cap = cv2.VideoCapture(0)
-draw_points = []
-THRESHOLD = 50  # Maximum allowed distance between consecutive points (in pixels)
+window_name = "Object detection"
 
-# Flags and counters for recognition and asynchronous model processing
-recognition_done = False
-recognized_text = ""
-old_recognized_text = ""
-result = ""   # This holds the final result from the model.
-count = 0
-processing = False  # Indicates if the model is currently processing
-drawing = True
-
+#initilize function
 count1 = 0
 count2 = 0
 count3 = 0
+
+#detection function
+count4 = 0
+
+#list object
+count5 = 0
+count6 = 0
+count7 = 0
+choice = -1
+
+initialize = True
+prediction = False
+processing = False
+result = None
+with open("data.json", "r") as f:
+    data = json.load(f)
+def process_model(text):
+    """
+    Calls the model's reply function and updates the global result.
+    Runs in a separate thread.
+    """
+    global result, processing
+    result = model_predict.price(text)
+    print(result)
+    processing = False
+    # Optionally, clear drawing points after processing.
 def fingers_folded(hand_landmarks):
     """
     Checks if the index, middle, ring, and pinky fingers are folded.
@@ -50,23 +73,6 @@ def fingers_folded(hand_landmarks):
     if lm[20].y < lm[18].y:
         folded = False
     return folded
-
-def process_model(text):
-    """
-    Calls the model's reply function and updates the global result.
-    Runs in a separate thread.
-    """
-    global result, processing, draw_points
-    result = model.reply_from_chat_bot(text)
-    processing = False
-    # Optionally, clear drawing points after processing.
-    draw_points = []
-
-# Set up full-screen window
-window_name = "Hand Drawing Recognition"
-# cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-# cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-
 while True:
     ret, frame = cap.read()
     if not ret:
@@ -86,141 +92,151 @@ while True:
         index_pip = hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_PIP]
         x, y = int(index_tip.x * w), int(index_tip.y * h)
 
-        # Record drawing points if the index finger is raised (tip above PIP).
-        if index_tip.y < index_pip.y and drawing:
-            draw_points.append((x, y))
-            cv2.circle(frame, (x, y), 5, (0, 0, 255), cv2.FILLED)
-            recognition_done = False  # Reset recognition if drawing resumes.
 
-        # When all fingers are folded and enough points have been collected, trigger OCR.
-        if fingers_folded(hand_landmarks) and not recognition_done and len(draw_points) > 10:
-            canvas = np.zeros((h, w), dtype=np.uint8)
-            for i in range(1, len(draw_points)):
-                pt1 = draw_points[i - 1]
-                pt2 = draw_points[i]
-                if math.hypot(pt2[0] - pt1[0], pt2[1] - pt1[1]) < THRESHOLD:
-                    cv2.line(canvas, pt1, pt2, 255, 3)
-            kernel = np.ones((3, 3), np.uint8)
-            canvas = cv2.dilate(canvas, kernel, iterations=1)
-            canvas_inv = cv2.bitwise_not(canvas)
-            recognized_text = pytesseract.image_to_string(canvas_inv, config='--psm 7').strip()
-            print("Recognized:", recognized_text)
-            recognition_done = True
-
-        # When fingers remain folded and recognition is done, check if we should trigger the model.
-        if fingers_folded(hand_landmarks) and recognition_done:
-            if recognized_text == old_recognized_text:
-                count += 1
-                if count > 50 and not processing:
-                    processing = True
-                    threading.Thread(target=process_model, args=(recognized_text,)).start()
-                    print(result)
-                    drawing = False
-                    count = 0
-            else:
-                old_recognized_text = recognized_text
-                count = 0
-
-    # Draw the user's trail on the frame.
-    for i in range(1, len(draw_points)):
-        pt1 = draw_points[i - 1]
-        pt2 = draw_points[i]
-        if math.hypot(pt2[0] - pt1[0], pt2[1] - pt1[1]) < THRESHOLD:
-            cv2.line(frame, pt1, pt2, (255, 0, 0), 3)
-
-    # Display the result persistently if available.
-    if result:
-        title_index = []
-        video_id = []
-        for i in range(len(result)):
-            if i + 6 < len(result):
-                if result[i:i + 6] == "Title:":
-                    title_index.append(i)
-            if i + 9 < len(result):
-                if result[i:i + 9] == "Video ID:":
-                    video_id.append(i)
-        title = []
-        ids = []
-        for i in range(len(title_index)):
-            if i + 1 < len(title_index):
-                title.append(result[title_index[i] + 6:video_id[i] - 1].strip())
-                ids.append(result[video_id[i] + 9:title_index[i + 1] - 3].strip())
-            else:
-                title.append(result[title_index[i] + 6:video_id[i] - 1].strip())
-                ids.append(result[video_id[i] + 9:].strip())
+    if initialize == True:
         if results.multi_hand_landmarks:
             for hand_landmarks in results.multi_hand_landmarks:
                 lm = hand_landmarks.landmark
-                if lm[12].y < lm[10].y and lm[16].y < lm[14].y and lm[8].y < lm[6].y:
-                    count1 += 1
+                if lm[16].y < lm[14].y and lm[12].y < lm[10].y and lm[8].y < lm[6].y:
+                    count3 += 1
+                    print(count3)
                     count2 = 0
-                    count3 = 0
-                    cv2.putText(frame, title[0], (10, 100), cv2.FONT_HERSHEY_SIMPLEX,
+                    count1 = 0
+                    cv2.putText(frame, "Welcome to the program", (10, 100), cv2.FONT_HERSHEY_SIMPLEX,
                                 0.5, (0, 255, 0), 2, cv2.LINE_AA)
-                    cv2.putText(frame, title[1], (10, 200), cv2.FONT_HERSHEY_SIMPLEX,
+                    cv2.putText(frame, "1.Detect the object", (10, 200), cv2.FONT_HERSHEY_SIMPLEX,
                                 0.5, (0, 255, 0), 2, cv2.LINE_AA)
-                    cv2.putText(frame, title[2], (10, 300), cv2.FONT_HERSHEY_SIMPLEX,
+                    cv2.putText(frame, "2. Prediction function", (10, 300), cv2.FONT_HERSHEY_SIMPLEX,
+                                0.5, (0, 255, 0), 2, cv2.LINE_AA)
+                    cv2.putText(frame, "3. List of detected object", (10, 400), cv2.FONT_HERSHEY_SIMPLEX,
                                 0.5, (255, 0, 0), 2, cv2.LINE_AA)
-                    if count1 == 20:
-                        url = "https://www.youtube.com/watch?v=" + ids[2]
-                        webbrowser.open(url)
-                        break
-                elif lm[12].y < lm[10].y and lm[8].y < lm[6].y:
+                    if count3 == 20:
+                        initialize = False
+                elif lm[12].y < lm[10].y and lm[8].y< lm[6].y:
                     count2 += 1
                     count1 = 0
                     count3 = 0
-                    cv2.putText(frame, title[0], (10, 100), cv2.FONT_HERSHEY_SIMPLEX,
+                    cv2.putText(frame, "Welcome to the program", (10, 100), cv2.FONT_HERSHEY_SIMPLEX,
                                 0.5, (0, 255, 0), 2, cv2.LINE_AA)
-                    cv2.putText(frame, title[1], (10, 200), cv2.FONT_HERSHEY_SIMPLEX,
-                                0.5, (255, 0, 0), 2, cv2.LINE_AA)
-                    cv2.putText(frame, title[2], (10, 300), cv2.FONT_HERSHEY_SIMPLEX,
+                    cv2.putText(frame, "1.Detect the object", (10, 200), cv2.FONT_HERSHEY_SIMPLEX,
+                                0.5, (0, 255, 0), 2, cv2.LINE_AA)
+                    cv2.putText(frame, "2. Prediction function", (10, 300), cv2.FONT_HERSHEY_SIMPLEX,
+                                0.5, (255,0, 0), 2, cv2.LINE_AA)
+                    cv2.putText(frame, "3. List of detected object", (10, 400), cv2.FONT_HERSHEY_SIMPLEX,
                                 0.5, (0, 255, 0), 2, cv2.LINE_AA)
                     if count2 == 20:
-                        url = "https://www.youtube.com/watch?v=" + ids[1]
-                        webbrowser.open(url)
-                        break
+                        initialize = False
                 elif lm[8].y < lm[6].y:
-                    count3 += 1
-                    count1 = 0
+                    count1 += 1
                     count2 = 0
-                    cv2.putText(frame, title[0], (10, 100), cv2.FONT_HERSHEY_SIMPLEX,
+                    count3 = 0
+                    cv2.putText(frame, "Welcome to the program", (10, 100), cv2.FONT_HERSHEY_SIMPLEX,
+                                0.5, (0, 255, 0), 2, cv2.LINE_AA)
+                    cv2.putText(frame, "1.Detect the object", (10, 200), cv2.FONT_HERSHEY_SIMPLEX,
                                 0.5, (255, 0, 0), 2, cv2.LINE_AA)
-                    cv2.putText(frame, title[1], (10, 200), cv2.FONT_HERSHEY_SIMPLEX,
+                    cv2.putText(frame, "2. Prediction function", (10, 300), cv2.FONT_HERSHEY_SIMPLEX,
                                 0.5, (0, 255, 0), 2, cv2.LINE_AA)
-                    cv2.putText(frame, title[2], (10, 300), cv2.FONT_HERSHEY_SIMPLEX,
+                    cv2.putText(frame, "3. List of detected object", (10, 400), cv2.FONT_HERSHEY_SIMPLEX,
                                 0.5, (0, 255, 0), 2, cv2.LINE_AA)
-                    if count3 == 20:
-                        url = "https://www.youtube.com/watch?v=" + ids[0]
-                        webbrowser.open(url)
-                        break
-                else:
-                    cv2.putText(frame, title[0], (10, 100), cv2.FONT_HERSHEY_SIMPLEX,
-                                0.5, (0, 255, 0), 2, cv2.LINE_AA)
-                    cv2.putText(frame, title[1], (10, 200), cv2.FONT_HERSHEY_SIMPLEX,
-                                0.5, (0, 255, 0), 2, cv2.LINE_AA)
-                    cv2.putText(frame, title[2], (10, 300), cv2.FONT_HERSHEY_SIMPLEX,
-                                0.5, (0, 255, 0), 2, cv2.LINE_AA)
+                    if count1 == 20:
+                        initialize = False
+                        prediction = True
+        else:
+            cv2.putText(frame, "Welcome to the program", (10, 100), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5, (0, 255, 0), 2, cv2.LINE_AA)
+            cv2.putText(frame, "1.Detect the object", (10, 200), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5, (0, 255, 0), 2, cv2.LINE_AA)
+            cv2.putText(frame, "2. Prediction function", (10, 300), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5, (0, 255, 0), 2, cv2.LINE_AA)
+            cv2.putText(frame, "3. List of detected object", (10, 400), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5, (0, 255, 0), 2, cv2.LINE_AA)
+    elif count1 == 20 and initialize == False:
+            if results.multi_hand_landmarks:
+                hand_landmarks = results.multi_hand_landmarks[0]
+                mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                if fingers_folded(hand_landmarks):
+                    count4 += 1
+                    print(count4)
+                    if count4 == 20:
+                        count1 = 0
+                        initialize = True
+
+            results = model.track(frame, persist=True,conf = 0.8)
+            results[0].save_txt("Results.txt")
+            frame = results[0].plot()
+            # cv2.imshow(window_name, frame)
+            #
+            # if cv2.waitKey(1) & 0xFF == ord("q"):
+            #             break
+    elif count3 == 20 and initialize == False:
+        arr_list = []
+        with open("Results.txt", "r") as f:
+            for line in f:
+                arr = line.split(" ")
+                if arr[0] not in arr_list and arr[0] != "0":
+                    arr_list.append(arr[0])
+        if results.multi_hand_landmarks:
+            hand_landmarks = results.multi_hand_landmarks[0]
+            mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+            lm = hand_landmarks.landmark
+            if lm[16].y < lm[14].y and lm[12].y < lm[10].y and lm[8].y < lm[6].y:
+                count5 += 1
+                print(count5)
+                if count5 == 20:
+                    count3 = 0
+                    #initialize = True
+                    detected_object = data[arr_list[choice]]
+                    print(detected_object)
+                    count5 = 0
+                    processing = True
+                    threading.Thread(target=process_model, args=(detected_object,)).start()
+            elif lm[12].y < lm[10].y and lm[8].y < lm[6].y and (choice - 1 > -1):
+                count6 += 1
+                if count6 == 10:
+                    choice -= 1
+                    count6 = 0
+
+            elif lm[8].y < lm[6].y and (choice + 1 <= len(arr_list) -1):
+                count7 += 1
+                if count7 == 10:
+                    choice += 1
+                    count7 = 0
 
 
+        for i in range(len(arr_list)):
+            text = f'{i+1}. {data[arr_list[i]]}'
+            if i == choice:
+                cv2.putText(frame, text, (10, 100 + i*100), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5, (255, 0, 0), 2, cv2.LINE_AA)
+            else:
+                cv2.putText(frame, text, (10, 100 + i * 100), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.5, (0, 255, 0), 2, cv2.LINE_AA)
+        # cv2.imshow(window_name, frame)
+        # count3 = 0
+        # initialize = True
     elif processing:
-        cv2.putText(frame, "Processing...", (10, 100), cv2.FONT_HERSHEY_SIMPLEX,
-                    2, (0, 255, 255), 3, cv2.LINE_AA)
-    else:
-        cv2.putText(frame, recognized_text, (10, 100), cv2.FONT_HERSHEY_SIMPLEX,
-                    2, (0, 255, 0), 3, cv2.LINE_AA)
-
+        cv2.putText(frame, "Predicting the price", (10, 100), cv2.FONT_HERSHEY_SIMPLEX,
+                    1, (0, 255, 255), 2, cv2.LINE_AA)
+    elif result:
+        cv2.putText(frame, f"The price of {detected_object}: ${result:.2f}", (10, 100), cv2.FONT_HERSHEY_SIMPLEX,
+                    1, (0, 255, 255), 2, cv2.LINE_AA)
     cv2.imshow(window_name, frame)
     key = cv2.waitKey(1) & 0xFF
-    if key == ord('c'):  # Clear drawing and reset text/flags.
-        draw_points = []
-        recognized_text = ""
-        recognition_done = False
-        result = ""
-        count = 0
-    elif key == ord('q'):  # Quit the application.
+    if key == ord("q"):
         break
 
     time.sleep(0.1)  # Slow down loop iterations slightly.
 
 cap.release()
 cv2.destroyAllWindows()
+
+
+
+
+
+
+
+
+
+
+
